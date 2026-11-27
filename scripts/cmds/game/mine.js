@@ -241,6 +241,12 @@ ${line}`
         await message.reply(box(title, bodyLines, footerLines));
       } catch (e) {
         console.error("[mine] reveal failed:", e.message);
+        // The stake was already deducted — never leave the user staring at
+        // the "mines placed" message with no result.
+        try {
+          const p = message.reply("❌ Couldn't reveal the mines — check your balance with .bal and try again.");
+          if (p && typeof p.catch === "function") p.catch(() => {});
+        } catch (_) { /* last resort — the error is already logged */ }
       }
     }, 3500);
 

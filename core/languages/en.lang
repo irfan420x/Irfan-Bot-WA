@@ -15,3 +15,7 @@ wabot.onlyGroup=This command only works in groups.
 wabot.onlyGroupAdmin=This command is for group admins only.
 wabot.cooldown=Slow down — wait %1s before using %2 again.
 wabot.commandError=Something went wrong while running that command.
+wabot.replyError=Something went wrong with that reply. Please try again.
+wabot.prefixHint=👋 Hi! I'm %1. Type %2help to see my commands.
+wabot.unknownCommand=❓ Unknown command "%1". Type %2help to see all commands.
+wabot.didYouMean= Did you mean "%1"?

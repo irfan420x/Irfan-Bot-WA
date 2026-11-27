@@ -30,30 +30,40 @@ module.exports = {
       processingMessage = waiting && waiting.messageID;
 
       // ORION only (NoobCore fallback dropped).
+      let resultText = null;
       try {
         const orionRes = await orionGet("/anime/v1/random-video", { timeout: 20000 });
         if (orionRes && orionRes.url) {
           const titleLine = orionRes.title ? `🎬 ${orionRes.title}\n` : "";
-          await message.reply(
-            `${titleLine}🎬 Here's a random anime video for you! 😊💖\n${orionRes.url}`
-          );
-          if (processingMessage && message.unsend) {
-            try { await message.unsend(processingMessage); } catch (e) {}
-          }
-          return;
+          resultText = `${titleLine}🎬 Here's a random anime video for you! 😊💖\n${orionRes.url}`;
         }
       } catch (e) {
         console.warn("[orion] animevideo failed:", e.message);
       }
+      if (!resultText) resultText = "❌ Oops! Something went wrong, please try again later.";
 
+      // Edit-in-place: the wait message becomes the result (one message,
+      // not two). If the edit fails, fall back to a normal reply and
+      // remove the wait message.
+      if (processingMessage && typeof message.edit === "function") {
+        try {
+          await message.edit(processingMessage, resultText);
+          return;
+        } catch (_) { /* fall through to the plain-reply fallback */ }
+      }
       if (processingMessage && message.unsend) {
         try { await message.unsend(processingMessage); } catch (e) {}
       }
-      return message.reply(
-        "❌ Oops! Something went wrong, please try again later."
-      );
+      return message.reply(resultText);
     } catch (error) {
       console.error(error);
+      // Last resort: edit the wait in place, else a fresh reply.
+      if (processingMessage && typeof message.edit === "function") {
+        try {
+          await message.edit(processingMessage, "❌ Oops! Something went wrong, please try again later.");
+          return;
+        } catch (_) { /* fall through */ }
+      }
       if (processingMessage && message.unsend) {
         try { await message.unsend(processingMessage); } catch (e) {}
       }

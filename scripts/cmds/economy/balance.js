@@ -180,23 +180,49 @@ function drawProgressBar(ctx, x, y, width, height, progress, color) {
  * this bot — when it is missing (or the download fails) the card draws
  * an initial instead. Never throws.
  */
-async function loadUserAvatar(canvasLib, usersData, targetID) {
+/**
+ * Load the target user's avatar as a canvas image.
+ * Tries the LIVE WhatsApp profile picture first (sock.profilePictureUrl),
+ * then a stored avatar URL if the DB has one. Returns null when no picture
+ * is available (private profile, no picture, or fetch failure) — the card
+ * then draws an initial instead. Never throws.
+ */
+async function loadUserAvatar(canvasLib, sock, usersData, targetID) {
+    const jid = String(targetID || "").replace(/@.*$/, "") + "@s.whatsapp.net";
+    // 1. Live fetch via Baileys (most reliable).
+    if (sock && typeof sock.profilePictureUrl === "function") {
+        try {
+            const url = await Promise.race([
+                sock.profilePictureUrl(jid, "image"),
+                new Promise((_, reject) => setTimeout(() => reject(new Error("avatar timeout")), 10000))
+            ]);
+            if (url) {
+                const response = await fetch(url);
+                if (response.ok) {
+                    const buffer = Buffer.from(await response.arrayBuffer());
+                    if (buffer.length >= 100) return await canvasLib.loadImage(buffer);
+                }
+            }
+        } catch (error) {
+            console.log("Avatar live fetch failed:", error.message);
+        }
+    }
+    // 2. Stored avatar URL (if the DB ever has one).
     try {
-        if (!usersData || typeof usersData.getAvatarUrl !== "function") return null;
-        const avatarURL = await usersData.getAvatarUrl(targetID);
-        if (!avatarURL) return null;
-
-        const response = await fetch(avatarURL);
-        if (!response.ok) return null;
-
-        const buffer = Buffer.from(await response.arrayBuffer());
-        if (buffer.length < 100) return null;
-
-        return await canvasLib.loadImage(buffer);
+        if (usersData && typeof usersData.getAvatarUrl === "function") {
+            const avatarURL = await usersData.getAvatarUrl(targetID);
+            if (avatarURL) {
+                const response = await fetch(avatarURL);
+                if (response.ok) {
+                    const buffer = Buffer.from(await response.arrayBuffer());
+                    if (buffer.length >= 100) return await canvasLib.loadImage(buffer);
+                }
+            }
+        }
     } catch (error) {
         console.log("Avatar load error:", error.message);
-        return null;
     }
+    return null;
 }
 
 /**
@@ -224,16 +250,16 @@ function pillTextColor(hex) {
  * Canvas is required lazily by the caller; throws when canvas is not
  * installed, and the caller falls back to the text box.
  */
-async function generateBalanceCard(userData, tier, targetID, usersData) {
+async function generateBalanceCard(userData, tier, targetID, usersData, sock, displayName) {
     const canvasLib = require("canvas"); // lazy + optional — throws if absent
     const { createCanvas } = canvasLib;
     const W = CONFIG.card.width, H = CONFIG.card.height;
     const canvas = createCanvas(W, H);
     const ctx = canvas.getContext("2d");
     const botName = (global.wabot && global.wabot.config && (global.wabot.config.botName || global.wabot.config.name)) || "WABOT";
-    const name = (userData.name || "User").length > 22
-        ? (userData.name || "User").slice(0, 20) + "..."
-        : (userData.name || "User");
+    const name = (displayName || userData.name || "User").length > 22
+        ? (displayName || userData.name || "User").slice(0, 20) + "..."
+        : (displayName || userData.name || "User");
 
     // --- Background: deep slate gradient + soft tier-colored glow ---
     const bg = ctx.createLinearGradient(0, 0, 0, H);
@@ -271,7 +297,7 @@ async function generateBalanceCard(userData, tier, targetID, usersData) {
 
     // --- Avatar (left) with tier-colored ring ---
     const ax = 125, ay = 165, ar = 72;
-    const avatar = await loadUserAvatar(canvasLib, usersData, targetID);
+    const avatar = await loadUserAvatar(canvasLib, sock, usersData, targetID);
     ctx.save();
     ctx.beginPath();
     ctx.arc(ax, ay, ar, 0, Math.PI * 2);
@@ -344,7 +370,7 @@ module.exports = {
         guide: "╔═══ 𝐄𝐂𝐎𝐍𝐎𝐌𝐘 ═══╗\n║ 💰 {pn} - Check balance\n║ 👤 {pn} @user - Check someone\n║ 💸 {pn} transfer @user <amt>\n║ 🎁 {pn} daily - Claim bonus\n╚══════════════════╝"
     },
 
-    onStart: async function ({ message, event, args, usersData }) {
+    onStart: async function ({ message, event, args, usersData, sock }) {
         const { senderID, mentions, messageReply } = event;
         const command = args[0] && args[0].toLowerCase();
 
@@ -402,21 +428,27 @@ module.exports = {
             const targetID = Object.keys(mentions || {})[0] || (messageReply && messageReply.senderID) || senderID;
             const userData = await usersData.get(targetID);
             const tier = getTierInfo(userData.money);
+            // Real name: DB record first, then the sender's live push name
+            // (self only — a mentioned user has no push name on this event).
+            const displayName = userData.name
+                || (String(targetID) === String(senderID) ? (event.senderName || null) : null)
+                || "User";
 
             const balMsg = `╔═══ 𝐁𝐀𝐋𝐀𝐍𝐂𝐄 ═══╗\n` +
-                `║ 👤 User: ${userData.name || "User"}\n` +
+                `║ 👤 User: ${displayName}\n` +
                 `║ 💰 Money: ${fm(userData.money)}\n` +
                 `║ 🏆 Tier: ${tier.badge} ${tier.name}\n` +
                 `╠══════════════════╣\n` +
                 `║ 📈 Progress: ${Math.round(tier.progress)}%\n` +
                 `╚══════════════════╝`;
 
-            // Send the visual card; fall back to the text box if rendering fails
-            // (canvas not installed is the expected case on this bot).
+            // Send the visual card with no caption — the card already shows
+            // name, balance, tier and progress, so the text box below it
+            // would just duplicate it. Full text only when there is no card.
             try {
-                const cardBuffer = await generateBalanceCard(userData, tier, targetID, usersData);
+                const cardBuffer = await generateBalanceCard(userData, tier, targetID, usersData, sock, displayName);
                 return message.reply({
-                    body: balMsg,
+                    body: "",
                     attachment: { buffer: cardBuffer, mimetype: "image/png", fileName: "balance.png" }
                 });
             } catch (cardErr) {

@@ -11,6 +11,55 @@
 //   whole user object.
 
 const { parseBet } = require("./_gameUI.js");
+const card = require("../_card.js");
+
+/**
+ * Render the ORION coin-flip card (900x480) and return a PNG buffer.
+ * Returns null when canvas is unavailable. Throws on render errors —
+ * the caller falls back to the text message.
+ */
+function renderCoinflipCard({ pick, result, win, bet, oldBalance, newBalance }) {
+  const c = card.newCard(900, 480);
+  if (!c) return null;
+  const { ctx, W, H } = c;
+
+  card.title(ctx, W, "COIN FLIP", 78, 44);
+
+  // "Your pick" vs "Result" — two columns.
+  const leftX = W / 4;
+  const rightX = (W / 4) * 3;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillStyle = card.BRAND.muted;
+  ctx.font = "26px sans-serif";
+  ctx.fillText("Your pick", leftX, 150);
+  ctx.fillText("Result", rightX, 150);
+  ctx.fillStyle = card.BRAND.text;
+  ctx.font = "bold 40px sans-serif";
+  ctx.fillText(pick, leftX, 205);
+  ctx.fillText(result, rightX, 205);
+
+  // WIN / LOSE banner pill, centered.
+  const banner = win ? "YOU WIN" : "YOU LOSE";
+  const bannerBg = win ? card.BRAND.green : card.BRAND.red;
+  ctx.font = "bold 30px sans-serif";
+  const pillW = ctx.measureText(banner).width + 64;
+  card.pill(ctx, (W - pillW) / 2, 252, banner, { bg: bannerBg, font: "bold 30px sans-serif", h: 56 });
+
+  // Balance line.
+  ctx.fillStyle = card.BRAND.subtle;
+  ctx.font = "28px sans-serif";
+  ctx.fillText(`Old balance: ${oldBalance}  →  Current balance: ${newBalance}`, W / 2, 368);
+
+  // Won / lost amount.
+  ctx.fillStyle = win ? card.BRAND.green : card.BRAND.red;
+  ctx.font = "bold 30px sans-serif";
+  ctx.fillText(win ? `You won: +${bet * 2}` : `You lost: -${bet}`, W / 2, 410);
+
+  card.footer(ctx, W, H);
+  return card.toPng(c.canvas);
+}
+
 
 module.exports = {
   config: {
@@ -77,6 +126,20 @@ ${win ? `You won 💰 : ${bet * 2}` : `You lost 💵 : ${bet}`}
 Current bal : ${newBalance} 💸
 ${line}`;
 
+      // Send the visual card; fall back to the text message if rendering fails.
+      // No caption with the card — the card already shows pick, result and
+      // balances, so the full text below it would just duplicate it.
+      try {
+        const buf = renderCoinflipCard({ pick, result, win, bet, oldBalance, newBalance });
+        if (buf) {
+          return message.reply({
+            body: "",
+            attachment: { buffer: buf, mimetype: "image/png", fileName: "coinflip.png" },
+          });
+        }
+      } catch (cardErr) {
+        console.error("Coinflip card render failed:", cardErr.message);
+      }
       return message.reply(msg);
 
     } catch (err) {
@@ -84,4 +147,7 @@ ${line}`;
       message.reply("❌ Coinflip error occurred.");
     }
   },
+
+  // Exported for tests / verification only.
+  _renderCoinflipCard: renderCoinflipCard,
 };

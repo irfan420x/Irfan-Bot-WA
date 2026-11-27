@@ -198,6 +198,43 @@ async function handleMessage(message, event, usersData, api, question) {
   // Let the user know we are thinking (Gemini can take a while).
   try { if (message.react) await message.react("⏳"); } catch (e) {}
 
+  // Wait message, edited in place with the answer when it arrives
+  // (one message, not wait + result). The edited message keeps its ID,
+  // so the reply-chain registration below uses the wait message's ID.
+  let waitId = null;
+  try {
+    const wait = await message.reply("⏳ ভাবছি… একটু অপেক্ষা করো।");
+    waitId = wait && wait.messageID;
+  } catch (e) { /* wait message is best-effort */ }
+
+  const registerReply = (id) => {
+    if (!id) return;
+    if (global.wabot && global.wabot.replyMap) {
+      global.wabot.replyMap.set(id, {
+        name: "irfan",
+        commandName: "irfan",
+        author: event.senderID
+      });
+    }
+  };
+
+  const deliver = async (text) => {
+    if (waitId && typeof message.edit === "function") {
+      try {
+        await message.edit(waitId, text);
+        registerReply(waitId);
+        return;
+      } catch (_) { /* fall through to a fresh reply */ }
+    }
+    if (waitId && message.unsend) {
+      try { await message.unsend(waitId); } catch (e) {}
+    }
+    message.reply(text, (err, info) => {
+      if (err || !info || !info.messageID) return;
+      registerReply(info.messageID);
+    });
+  };
+
   try {
 
     const user = await usersData.get(event.senderID).catch(() => null);
@@ -231,22 +268,13 @@ async function handleMessage(message, event, usersData, api, question) {
 
     addHistory(event.senderID, question, reply);
 
-    message.reply(reply, (err, info) => {
-      if (err || !info || !info.messageID) return;
-      if (global.wabot && global.wabot.replyMap) {
-        global.wabot.replyMap.set(info.messageID, {
-          name: "irfan",
-          commandName: "irfan",
-          author: event.senderID
-        });
-      }
-    });
+    await deliver(reply);
 
   } catch (e) {
 
     console.error("[Irfan Error]", e.message);
 
-    message.reply("╔═══ 𝐈𝐍𝐅𝐎 ═══╗\n║ AI এখন ঘুমাচ্ছে 😴 একটু পরে try করো।\n╚══════════════════╝");
+    await deliver("╔═══ 𝐈𝐍𝐅𝐎 ═══╗\n║ AI এখন ঘুমাচ্ছে 😴 একটু পরে try করো।\n╚══════════════════╝");
 
   }
 

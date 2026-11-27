@@ -15,6 +15,99 @@
 //   a partial object with "data.slotsToday" / "data.slotsAll" dot-paths).
 
 const { box, fm, parseBet, streakText } = require("./_gameUI.js");
+const card = require("../_card.js");
+
+/**
+ * Draw one reel symbol inside a reel box. Fruit emoji render monochrome
+ * white in canvas text; the star glyph is invisible, so it is drawn
+ * with card.drawStar instead. The 7-keycap renders as "7".
+ */
+function drawReelSymbol(ctx, symbol, cx, cy) {
+  if (symbol === "⭐") {
+    card.drawStar(ctx, cx, cy, 52, card.BRAND.gold);
+    return;
+  }
+  ctx.save();
+  ctx.fillStyle = card.BRAND.text;
+  ctx.font = "96px sans-serif";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText(symbol, cx, cy + 4);
+  ctx.restore();
+}
+
+/**
+ * Render the ORION slots result card (1000x580) and return a PNG buffer.
+ * Returns null when canvas is unavailable. Throws on render errors —
+ * the caller falls back to the text message.
+ */
+function renderSlotsCard({ s1, s2, s3, win, mult, bet, newBalance, nearMiss, todayPlay, dl, streak }) {
+  const c = card.newCard(1000, 580);
+  if (!c) return null;
+  const { ctx, W, H } = c;
+  const symbols = [s1, s2, s3];
+
+  card.title(ctx, W, "SLOT MACHINE", 72, 44);
+
+  // Three reel boxes.
+  const reelSize = 180;
+  const gap = 40;
+  const totalW = reelSize * 3 + gap * 2;
+  const startX = (W - totalW) / 2;
+  const reelY = 118;
+  for (let i = 0; i < 3; i++) {
+    const x = startX + i * (reelSize + gap);
+    ctx.fillStyle = "rgba(255, 255, 255, 0.06)";
+    card.roundedRect(ctx, x, reelY, reelSize, reelSize, 24);
+    ctx.fill();
+    ctx.strokeStyle = card.BRAND.panelBorder;
+    ctx.lineWidth = 1.5;
+    card.roundedRect(ctx, x, reelY, reelSize, reelSize, 24);
+    ctx.stroke();
+    drawReelSymbol(ctx, symbols[i], x + reelSize / 2, reelY + reelSize / 2);
+  }
+
+  // Result banner.
+  const isJackpot = win > 0 && mult === 10;
+  const banner = isJackpot ? "JACKPOT" : win > 0 ? "YOU WIN" : "YOU LOSE";
+  const bannerBg = isJackpot ? card.BRAND.gold : win > 0 ? card.BRAND.green : card.BRAND.red;
+  ctx.font = "bold 30px sans-serif";
+  const pillW = ctx.measureText(banner).width + 64;
+  card.pill(ctx, (W - pillW) / 2, 330, banner, {
+    bg: bannerBg,
+    color: card.pillTextColor(bannerBg),
+    font: "bold 30px sans-serif",
+    h: 56,
+  });
+
+  // Won / lost line.
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillStyle = win > 0 ? card.BRAND.green : card.BRAND.red;
+  ctx.font = "bold 30px sans-serif";
+  ctx.fillText(
+    win > 0 ? `Won: +${fm(win)}  (${mult}x)` : `Lost: -${fm(bet)}`,
+    W / 2, 430
+  );
+
+  // Balance + today line.
+  ctx.fillStyle = card.BRAND.subtle;
+  ctx.font = "26px sans-serif";
+  ctx.fillText(`Balance: ${fm(newBalance)}   •   Today: ${todayPlay}/${dl}`, W / 2, 468);
+
+  // Near-miss / streak line, when present.
+  const extras = [];
+  if (nearMiss) extras.push("So close — two 7s!");
+  if ((streak || 0) >= 2) extras.push(`Streak: ${streak} wins in a row`);
+  if (extras.length) {
+    ctx.fillStyle = card.BRAND.purpleLight;
+    ctx.font = "24px sans-serif";
+    ctx.fillText(extras.join("   •   "), W / 2, 502);
+  }
+
+  card.footer(ctx, W, H);
+  return card.toPng(c.canvas);
+}
 
 const dn = 20;
 const dp = 30;
@@ -199,10 +292,25 @@ module.exports = {
 
     const finalMsg = box(resultTitle, bodyLines, footerLines);
 
+    /* ===== CARD =====
+       Render the result card BEFORE the spin frame goes out, so the
+       setTimeout callback below can use the pre-rendered buffer
+       (null on failure -> text only). */
+    let cardBuf = null;
+    try {
+      cardBuf = renderSlotsCard({
+        s1, s2, s3, win, mult, bet, newBalance, nearMiss,
+        todayPlay: todayStats.play, dl, streak: allStats.streak || 0,
+      });
+    } catch (cardErr) {
+      console.error("Slots card render failed:", cardErr.message);
+    }
+
     /* ===== SPIN ANIMATION =====
-       The Messenger version edited one message through api.editMessage;
-       this bot's api shim has no edit, so the spin frame goes out first
-       and the final result follows as a second message. */
+       Like the Messenger version, the spin frame animates in place — but
+       WhatsApp cannot edit a text message into an image, so instead the
+       spin frame is UNSENT and the result card goes out as a fresh message.
+       The user ends up with ONE message (the result), not two. */
     const spinFrame = () => {
       const r1 = roll(), r2 = roll(), r3 = roll();
       return box("🎰 SLOT MACHINE", [
@@ -211,17 +319,65 @@ module.exports = {
       ]);
     };
 
+    let spinId = null;
     try {
-      await message.reply(spinFrame());
+      const sent = await message.reply(spinFrame());
+      spinId = sent && sent.messageID;
     } catch (e) {
       // If even the spin frame fails, still deliver the result.
       return message.reply(finalMsg);
     }
+    // Animate in place like the Messenger bot: edit the spin frame twice
+    // with fresh reels (600ms apart). The edits queue behind the send
+    // guard, so they arrive a little slower than Messenger's, but in order.
+    if (spinId && typeof message.edit === "function") {
+      for (let i = 0; i < 2; i++) {
+        setTimeout(() => {
+          try {
+            const p = message.edit(spinId, spinFrame());
+            if (p && typeof p.catch === "function") p.catch(() => {});
+          } catch (_) { /* animation is cosmetic */ }
+        }, (i + 1) * 600);
+      }
+    }
     setTimeout(() => {
+      // Fallback: if anything in here throws before the result goes out
+      // (caption build, send failure), the user would be left staring at
+      // "Spinning..." forever — send the plain-text result instead.
+      const sendFallback = () => {
+        try {
+          const q = message.reply(finalMsg);
+          if (q && typeof q.catch === "function") q.catch(() => {});
+        } catch (_) { /* last resort — the handler already logged */ }
+      };
       try {
-        const p = message.reply(finalMsg);
-        if (p && typeof p.catch === "function") p.catch(() => {});
-      } catch (e) {}
+        // Remove the spin frame so only the result remains (best-effort —
+        // if the unsend fails, the result still goes out below).
+        if (spinId && typeof message.unsend === "function") {
+          try {
+            const p = message.unsend(spinId);
+            if (p && typeof p.catch === "function") p.catch(() => {});
+          } catch (_) { /* keep going */ }
+        }
+        // Short caption with the card — the card already shows the reels,
+        // result and balance. The full text box only when there is no card.
+        if (cardBuf) {
+          const captionLines = [];
+          if ((allStats.streak || 0) >= 2) captionLines.push(streakText(allStats.streak));
+          captionLines.push(`↩️ Again: .slots ${fm(bet)}`);
+          const p = message.reply({ body: captionLines.join("\n"), attachment: { buffer: cardBuf, mimetype: "image/png", fileName: "slots.png" } });
+          if (p && typeof p.catch === "function") p.catch(() => sendFallback());
+        } else {
+          const p = message.reply(finalMsg);
+          if (p && typeof p.catch === "function") p.catch(() => sendFallback());
+        }
+      } catch (e) {
+        console.error("[slots] result failed:", e.message);
+        sendFallback();
+      }
     }, 1800);
-  }
+  },
+
+  // Exported for tests / verification only.
+  _renderSlotsCard: renderSlotsCard,
 };

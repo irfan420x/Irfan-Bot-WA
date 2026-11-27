@@ -143,7 +143,10 @@ function registerPage(author, query, urls, offset, pageSize, pageNum) {
 module.exports = {
   config: {
     name: "pinterest",
-    aliases: ["pin"],
+    // NOTE (2026-11-27): the "pin" alias was removed — it collided with
+    // the new admin .pin command (loader rejects duplicate names/aliases,
+    // and pinterest failed to load entirely). Use .pinterest (full name).
+    aliases: [],
     version: "2.2",
     role: 0,
     countDown: 5,

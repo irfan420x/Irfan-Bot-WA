@@ -11,6 +11,7 @@
 
 const os = require("os");
 const fs = require("fs");
+const card = require("../_card.js");
 
 function byte2mb(bytes) {
   if (bytes === 0 || bytes === undefined) return "0 Bytes";
@@ -75,6 +76,57 @@ async function getCpuUsage() {
   });
 }
 
+/**
+ * Render the SYSTEM STATUS card (1000x540) and return a PNG buffer.
+ * Returns null when canvas is unavailable; throws on render failure
+ * and the caller falls back to the text message.
+ */
+function renderUptimeCard(stats) {
+  const c = card.newCard(1000, 540);
+  if (!c) return null;
+  const { canvas, ctx, W, H } = c;
+
+  card.title(ctx, W, "SYSTEM STATUS", 70, 44);
+
+  // Big uptime string.
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillStyle = card.BRAND.purpleLight;
+  ctx.font = "bold 46px sans-serif";
+  ctx.fillText(`Uptime: ${stats.uptime}`, W / 2, 138);
+
+  // Usage bars: label on the left, bar to the right.
+  const bars = [
+    { label: "CPU", pct: stats.cpuUsage, color: card.BRAND.pink },
+    { label: "RAM", pct: stats.memoryPercent, color: card.BRAND.purple },
+    { label: "Disk", pct: stats.diskPercent, color: card.BRAND.green },
+  ];
+  bars.forEach((b, i) => {
+    const y = 182 + i * 56;
+    ctx.textAlign = "left";
+    ctx.textBaseline = "middle";
+    ctx.fillStyle = card.BRAND.subtle;
+    ctx.font = "bold 26px sans-serif";
+    ctx.fillText(b.label, 80, y + 14);
+    card.bar(ctx, 200, y, 720, 28, b.pct, { color: b.color });
+  });
+
+  // Users | Groups counts.
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillStyle = card.BRAND.text;
+  ctx.font = "bold 30px sans-serif";
+  ctx.fillText(`Users: ${stats.userCount}   |   Groups: ${stats.threadCount}`, W / 2, 396);
+
+  // Speed line.
+  ctx.fillStyle = card.BRAND.muted;
+  ctx.font = "24px sans-serif";
+  ctx.fillText(`Speed: ${stats.speedMs}ms`, W / 2, 442);
+
+  card.footer(ctx, W, H);
+  return card.toPng(canvas);
+}
+
 module.exports = {
   config: {
     name: "uptime",
@@ -103,6 +155,8 @@ module.exports = {
       const usedMemory = byte2mb(process.memoryUsage().rss);
       const memoryPercent = ((os.totalmem() - os.freemem()) / os.totalmem() * 100).toFixed(1);
 
+      const speedMs = Date.now() - startTime;
+
       const msg = `╔══════════════════╗
 ║  🖥️  ${"ＳＹＳＴＥＭ  ＳＴＡＴＵＳ"}  ║
 ╠══════════════════╣
@@ -112,10 +166,33 @@ module.exports = {
 ║ 🎯 RAM: ${usedMemory} / ${totalMemory}
 ║ 💾 Disk: ${diskSpaceInfo.used} / ${diskSpaceInfo.total}
 ║ 📊 Users: ${allUsers.length} | Groups: ${allThreads.length}
-║ ⚡ Speed: ${Date.now() - startTime}ms
+║ ⚡ Speed: ${speedMs}ms
 ╚══════════════════╝`.trim();
 
-      return message.reply(msg);
+      // Send the visual card; fall back to the text box if rendering fails
+      // (canvas not installed is the expected case on some hosts).
+      try {
+        const buf = renderUptimeCard({
+          uptime: getUptime(uptimeSeconds),
+          cpuUsage: cpuUsage.toFixed(1),
+          memoryPercent,
+          diskPercent: diskSpaceInfo.percent,
+          userCount: allUsers.length,
+          threadCount: allThreads.length,
+          speedMs,
+        });
+        if (buf) {
+          // No caption with the card — the card already shows the uptime.
+          return message.reply({
+            body: "",
+            attachment: { buffer: buf, mimetype: "image/png", fileName: "uptime.png" },
+          });
+        }
+        return message.reply(msg);
+      } catch (cardErr) {
+        console.error("Uptime card render failed:", cardErr.message);
+        return message.reply(msg);
+      }
     } catch (e) {
       return message.reply(`Error: ${e.message}`);
     }

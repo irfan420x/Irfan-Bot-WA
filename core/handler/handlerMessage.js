@@ -293,15 +293,179 @@ function buildContextFallback(sock, msg) {
 
 const cooldowns = new Map(); // `${commandName}:${senderID}` -> epoch ms
 
+// ---------------------------------------------------------------------------
+// Smart feedback helpers (typing presence, read receipts, reactions).
+// Every helper is best-effort: it never throws, so a Baileys hiccup can
+// never break the command it decorates.
+// ---------------------------------------------------------------------------
+
+// Commands that already react to the triggering message themselves (found
+// by grepping all command files for message.react / .react(). The handler
+// must NOT overwrite their completion emoji with its own ✅/❌.
+// Names + aliases, lower-cased — the handler checks both the typed token
+// and cmd.config.name against this set.
+const SELF_REACT_COMMANDS = new Set([
+  'irfan',
+  'gemini', 'ai', 'chat',
+  'gpt', 'chatgpt', 'gpt5',
+  'deepseek', 'ds',
+  'tart', 'tensorart',
+  'imagen3',
+  'fluxproultra', 'fpu',
+  'lumin',
+  'imgur'
+]);
+
+// Typing presence: 'composing' while a command runs, 'paused' when done.
+// Verified to exist in Baileys 6.7.24 (lib/Socket/chats.js).
+async function setPresence(sock, type, jid) {
+  try {
+    if (sock && typeof sock.sendPresenceUpdate === 'function') {
+      await sock.sendPresenceUpdate(type, jid);
+    }
+  } catch (_) { /* presence is cosmetic — never break the command */ }
+}
+
+// Blue ticks: mark the triggering message as read.
+// Verified to exist in Baileys 6.7.24 (lib/Socket/messages-send.js).
+async function markRead(sock, key) {
+  try {
+    if (sock && typeof sock.readMessages === 'function' && key) {
+      await sock.readMessages([key]);
+    }
+  } catch (_) { /* read receipt is cosmetic — never break the command */ }
+}
+
+// Reaction on the triggering message ('' removes it).
+async function setReaction(message, emoji) {
+  try {
+    if (message && typeof message.react === 'function') {
+      await message.react(emoji);
+    }
+  } catch (_) { /* reaction is cosmetic — never break the command */ }
+}
+
+// ---------------------------------------------------------------------------
+// Never-stay-silent helpers (user complaint 2026-11-27 18:18 SGT: the bot
+// stayed silent on a bare prefix, on unknown/typo'd commands, on command
+// errors in reply-flows, and on group commands typed in a DM).
+// ---------------------------------------------------------------------------
+
+// Classic Levenshtein distance (small strings only — command names).
+function levenshtein(a, b) {
+  const m = a.length, n = b.length;
+  if (m === 0) return n;
+  if (n === 0) return m;
+  let prev = Array.from({ length: n + 1 }, (_, j) => j);
+  for (let i = 1; i <= m; i++) {
+    const cur = [i];
+    for (let j = 1; j <= n; j++) {
+      cur[j] = Math.min(
+        prev[j] + 1,
+        cur[j - 1] + 1,
+        prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1)
+      );
+    }
+    prev = cur;
+  }
+  return prev[n];
+}
+
+// Best "did you mean" match over command names + aliases, or null.
+// Accepts distance <= 2, or a shared prefix of >= 3 chars (covers
+// truncations like ".balanc" -> ".balance").
+function suggestCommand(commands, typed) {
+  let best = null, bestDist = Infinity;
+  for (const cmd of commands.values()) {
+    const names = [cmd.config.name, ...(cmd.config.aliases || [])]
+      .filter(Boolean).map((s) => String(s).toLowerCase());
+    for (const candidate of names) {
+      const dist = levenshtein(typed, candidate);
+      const prefixHit = typed.length >= 3 && candidate.length >= 3
+        && (candidate.startsWith(typed) || typed.startsWith(candidate));
+      if (prefixHit && dist < 3) {
+        if (dist < bestDist) { best = candidate; bestDist = dist; }
+      } else if (dist <= 2 && dist < bestDist) {
+        best = candidate; bestDist = dist;
+      }
+    }
+  }
+  return best;
+}
+
 function isBotAdmin(config, senderID) {
   const admins = (config.adminBot || []).map(String);
   return admins.includes(String(senderID)) || String(config.owner) === String(senderID);
 }
 
+// ---------------------------------------------------------------------------
+// Silent-failure guards.
+// A reply the handler itself sends must never throw out of the handler:
+// if the send fails, log it and move on (the user simply gets nothing,
+// but the bot stays alive and the next message still works).
+// ---------------------------------------------------------------------------
+async function safeReply(message, text) {
+  try {
+    if (message && typeof message.reply === 'function') await message.reply(text);
+  } catch (err) {
+    console.warn(`[WABOT] handler reply failed: ${err.message}`);
+  }
+}
+
+// Damerau-Levenshtein edit distance (small strings only — command names).
+// An adjacent transposition costs 1, not 2, because swapping two letters
+// is the most common typo (".slto" -> ".slots" is one transposition, while
+// plain Levenshtein scores it 2 — the same as ".slto" -> ".set" — and the
+// wrong suggestion wins the tie).
+function editDistance(a, b) {
+  const m = a.length, n = b.length;
+  const d = [];
+  for (let i = 0; i <= m; i++) d[i] = [i];
+  for (let j = 0; j <= n; j++) d[0][j] = j;
+  for (let i = 1; i <= m; i++) {
+    for (let j = 1; j <= n; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + cost);
+      if (i > 1 && j > 1 && a[i - 1] === b[j - 2] && a[i - 2] === b[j - 1]) {
+        d[i][j] = Math.min(d[i][j], d[i - 2][j - 2] + 1);
+      }
+    }
+  }
+  return d[m][n];
+}
+
+function commonPrefixLen(a, b) {
+  let i = 0;
+  while (i < a.length && i < b.length && a[i] === b[i]) i++;
+  return i;
+}
+
+// Closest command for a mistyped token, or null. Only suggests when the
+// token is at least 3 chars and within edit distance 2 of a real command
+// name/alias; ties break toward the longer shared prefix. The suggestion
+// is the command's canonical name, so the user can copy-paste it.
+function findClosestCommand(commands, typed) {
+  if (!typed || typed.length < 3) return null;
+  let best = null, bestDist = Infinity, bestPrefix = -1;
+  for (const [key, cmd] of commands) {
+    const d = editDistance(typed, key);
+    if (d > 2) continue;
+    const p = commonPrefixLen(typed, key);
+    if (d < bestDist || (d === bestDist && p > bestPrefix)) {
+      bestDist = d; bestPrefix = p; best = cmd;
+    }
+  }
+  if (!best || !best.config || !best.config.name) return null;
+  return String(best.config.name).toLowerCase();
+}
+
 async function isGroupAdmin(sock, api, event) {
   try {
     const info = await api.getThreadInfo(event.threadIDFull || event.threadID);
-    return (info.adminIDs || []).includes(String(event.senderID));
+    // groupMetadata may list admins by LID while event.senderID is the
+    // phone number (or vice versa) — accept either.
+    const ids = [String(event.senderID), event.senderLid ? String(event.senderLid) : null].filter(Boolean);
+    return (info.adminIDs || []).some((id) => ids.includes(String(id)));
   } catch (err) {
     console.warn(`[WABOT] groupMetadata failed for ${event.threadIDFull}: ${err.message}`);
     return false; // fail closed on role-1 checks
@@ -357,24 +521,50 @@ async function handlerMessage(sock, msg) {
   // --- Command path -------------------------------------------------------
   if (body.startsWith(prefix)) {
     const withoutPrefix = body.slice(prefix.length).trim();
-    if (!withoutPrefix) return;
+    if (!withoutPrefix) {
+      // Prefix alone ("." / ".   "): hint at .help instead of staying silent.
+      const botName = config.nickNameBot || 'WABOT';
+      await safeReply(message, event.getLang('wabot.prefixHint', botName, prefix));
+      return;
+    }
     const parts = withoutPrefix.split(/\s+/);
     const name = (parts[0] || '').toLowerCase();
     const args = parts.slice(1);
     const cmd = commands.get(name);
 
-    if (!cmd) return; // unknown command — stay silent
+    if (!cmd) {
+      // Unknown command: say so, and suggest the closest real command when
+      // the typo is close (".slto" -> ".slots"). Plain chatter without the
+      // prefix still gets no reply — only prefixed text is answered.
+      const suggestion = findClosestCommand(commands, name);
+      let text = event.getLang('wabot.unknownCommand', name, prefix);
+      if (suggestion) text += event.getLang('wabot.didYouMean', prefix + suggestion);
+      await safeReply(message, text);
+      return;
+    }
+
+    // Read receipt: the bot acts on every known command (even one it then
+    // rejects with a denial reply), so mark it read. Status/broadcast and
+    // protocol-only messages were already filtered out above, and own
+    // messages (unless selfListen) too — so this only ever marks real
+    // incoming messages the bot responds to.
+    await markRead(sock, msg.key);
 
     const role = cmd.config.role || 0;
 
     // Role check.
     if (role === 2 && !isBotAdmin(config, event.senderID)) {
-      return message.reply(event.getLang('wabot.onlyBotAdmin'));
+      await safeReply(message, event.getLang('wabot.onlyBotAdmin'));
+      return;
     }
     if (role === 1) {
-      if (!event.isGroup) return message.reply(event.getLang('wabot.onlyGroup'));
+      if (!event.isGroup) {
+        await safeReply(message, event.getLang('wabot.onlyGroup'));
+        return;
+      }
       if (!(await isGroupAdmin(sock, api, event))) {
-        return message.reply(event.getLang('wabot.onlyGroupAdmin'));
+        await safeReply(message, event.getLang('wabot.onlyGroupAdmin'));
+        return;
       }
     }
 
@@ -385,18 +575,46 @@ async function handlerMessage(sock, msg) {
       const last = cooldowns.get(cdKey) || 0;
       const remainingMs = last + countDown * 1000 - Date.now();
       if (remainingMs > 0) {
-        return message.reply(event.getLang('wabot.cooldown', String(Math.ceil(remainingMs / 1000)), prefix + cmd.config.name));
+        await safeReply(message, event.getLang('wabot.cooldown', String(Math.ceil(remainingMs / 1000)), prefix + cmd.config.name));
+        return;
       }
       cooldowns.set(cdKey, Date.now());
     }
 
+    // Save the sender's WhatsApp display name (push name) into their user
+    // record so commands that show user info (.bal, .info) display the real
+    // name instead of the "User" fallback. Best-effort: only write when the
+    // stored name is missing or different, and never block the command.
+    if (event.senderName) {
+      try {
+        const senderData = (await usersData.get(event.senderID)) || {};
+        if (senderData.name !== event.senderName) {
+          senderData.name = event.senderName;
+          await usersData.set(event.senderID, senderData);
+        }
+      } catch (_) { /* name save is best-effort */ }
+    }
+
+    // Smart feedback starts ONLY here — after the role and cooldown checks
+    // have passed. A rejected command therefore never shows typing and
+    // never leaves a stale ⏳ behind (no reaction to clean up).
+    const selfReacts = SELF_REACT_COMMANDS.has(name)
+      || SELF_REACT_COMMANDS.has(String(cmd.config.name || '').toLowerCase());
+    await setPresence(sock, 'composing', event.threadIDFull);
+    await setReaction(message, '⏳');
+    let succeeded = false;
     try {
       await cmd.onStart({ api, event, args, message, threadsData, usersData, role, sock });
+      succeeded = true;
     } catch (err) {
       console.error(`[WABOT] Command "${cmd.config.name}" failed: ${err.stack || err.message}`);
-      try {
-        await message.reply(event.getLang('wabot.commandError'));
-      } catch (_) { /* ignore reply failure */ }
+      await safeReply(message, event.getLang('wabot.commandError'));
+    } finally {
+      // Completion reaction first (skipped for commands that react
+      // themselves, so their emoji is never overwritten), then typing off.
+      // 'paused' is sent on success AND error.
+      if (!selfReacts) await setReaction(message, succeeded ? '✅' : '❌');
+      await setPresence(sock, 'paused', event.threadIDFull);
     }
     return;
   }
@@ -410,6 +628,11 @@ async function handlerMessage(sock, msg) {
       if (cmd && typeof cmd.onReply === 'function') {
         // Only the user the reply was meant for (if recorded) may trigger it.
         if (entry.author && String(entry.author) !== String(event.senderID)) return;
+        await markRead(sock, msg.key);
+        const selfReacts = SELF_REACT_COMMANDS.has(String(entry.name).toLowerCase());
+        await setPresence(sock, 'composing', event.threadIDFull);
+        await setReaction(message, '⏳');
+        let succeeded = false;
         try {
           await cmd.onReply({
             api,
@@ -418,8 +641,13 @@ async function handlerMessage(sock, msg) {
             message,
             Reply: entry
           });
+          succeeded = true;
         } catch (err) {
           console.error(`[WABOT] onReply of "${entry.name}" failed: ${err.stack || err.message}`);
+          await safeReply(message, event.getLang('wabot.replyError'));
+        } finally {
+          if (!selfReacts) await setReaction(message, succeeded ? '✅' : '❌');
+          await setPresence(sock, 'paused', event.threadIDFull);
         }
       }
     }

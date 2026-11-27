@@ -2,13 +2,15 @@
 //
 // WhatsApp port notes (vs the Messenger original):
 // - The Messenger original drew a canvas system card (canvas and
-//   systeminformation are NOT installed here). The card is dropped; the
-//   complete text message is sent on its own — same stats, same text.
+//   systeminformation are NOT installed here). The card is rendered
+//   here with the shared _card.js helper (canvas is lazy-required and
+//   the text message is sent on its own if rendering fails).
 // - Disk usage comes from fs.statfsSync("/") instead of systeminformation.
 // - moment-timezone is not installed; Dhaka date/time come from Intl.
 
 const os = require("os");
 const fs = require("fs");
+const card = require("../_card.js");
 
 function formatUptime(seconds) {
   const d = Math.floor(seconds / (3600 * 24));
@@ -45,6 +47,52 @@ function getDiskUsage() {
     console.error("Disk Info Fetch Error:", e);
     return "0";
   }
+}
+
+/**
+ * Render the SYSTEM INFO card (1000x580) and return a PNG buffer.
+ * Returns null when canvas is unavailable; throws on render failure
+ * and the caller falls back to the text message.
+ */
+function renderSystemCard(stats) {
+  const c = card.newCard(1000, 580);
+  if (!c) return null;
+  const { canvas, ctx, W, H } = c;
+
+  card.title(ctx, W, "SYSTEM INFO", 72, 44);
+
+  // Usage bars: label on the left, bar to the right.
+  const bars = [
+    { label: "RAM", pct: stats.ramLoad, color: card.BRAND.purple },
+    { label: "CPU", pct: stats.cpuLoad, color: card.BRAND.pink },
+    { label: "Disk", pct: stats.diskLoad, color: card.BRAND.green },
+  ];
+  bars.forEach((b, i) => {
+    const y = 128 + i * 62;
+    ctx.textAlign = "left";
+    ctx.textBaseline = "middle";
+    ctx.fillStyle = card.BRAND.subtle;
+    ctx.font = "bold 26px sans-serif";
+    ctx.fillText(b.label, 80, y + 14);
+    card.bar(ctx, 200, y, 720, 28, b.pct, { color: b.color });
+  });
+
+  // Stat rows, two columns.
+  const left = [
+    ["Sys Uptime:", stats.sysUptime],
+    ["CPU Cores:", String(stats.cpuCores)],
+    ["Date:", stats.date],
+  ];
+  const right = [
+    ["Bot Uptime:", stats.botUptime],
+    ["Node.js:", stats.nodeVersion],
+    ["Time:", stats.time],
+  ];
+  left.forEach((row, i) => card.statRow(ctx, 80, 352 + i * 52, row[0], row[1]));
+  right.forEach((row, i) => card.statRow(ctx, 540, 352 + i * 52, row[0], row[1]));
+
+  card.footer(ctx, W, H);
+  return card.toPng(canvas);
 }
 
 module.exports = {
@@ -99,7 +147,25 @@ module.exports = {
         `║ ⏰ Time: ${time}\n` +
         `╚══════════════════╝`;
 
-      await message.reply(textMessage);
+      // Send the visual card; fall back to the text box if rendering fails
+      // (canvas not installed is the expected case on some hosts).
+      try {
+        const buf = renderSystemCard({
+          ramLoad, cpuLoad, diskLoad, sysUptime, botUptime,
+          cpuCores, nodeVersion, date, time,
+        });
+        if (buf) {
+          // No caption with the card — the card already shows the stats.
+          return message.reply({
+            body: "",
+            attachment: { buffer: buf, mimetype: "image/png", fileName: "system.png" },
+          });
+        }
+        return message.reply(textMessage);
+      } catch (cardErr) {
+        console.error("System card render failed:", cardErr.message);
+        return message.reply(textMessage);
+      }
     } catch (err) {
       console.error("SYSTEM COMMAND ERROR:", err);
       return message.reply("╔═══ 𝐄𝐑𝐑𝐎𝐑 ═══╗\n║ ❌ Something went wrong\n╚══════════════════╝");

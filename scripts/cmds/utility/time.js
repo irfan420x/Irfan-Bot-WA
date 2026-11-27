@@ -7,6 +7,10 @@
 //   the same text the original used as its last-resort fallback.
 // - moment-timezone is not installed; Dhaka time comes from Intl with
 //   timeZone "Asia/Dhaka".
+// - The ORION-brand time card is rendered with the shared _card.js
+//   helper; any render failure falls back to the text reply.
+
+const card = require("../_card.js");
 
 const TIMEZONE = "Asia/Dhaka";
 
@@ -57,12 +61,66 @@ module.exports = {
         try { await message.unsend(wait.messageID); } catch (e) { /* already gone — ignore */ }
       }
 
-      return await message.reply(
-        `🕒 ${p.hour}:${p.minute}:${p.second}\n📅 ${p.weekday}, ${p.day} ${p.month} ${p.year} (${TIMEZONE})\n🕐 ${time12}`
-      );
+      const textMsg =
+        `🕒 ${p.hour}:${p.minute}:${p.second}\n📅 ${p.weekday}, ${p.day} ${p.month} ${p.year} (${TIMEZONE})\n🕐 ${time12}`;
+
+      // Send the ORION time card; fall back to the text reply if the
+      // render fails (canvas not installed is the expected case).
+      try {
+        const buf = renderTimeCard({
+          time24: `${p.hour}:${p.minute}:${p.second}`,
+          dateLine: `${p.weekday}, ${p.day} ${p.month} ${p.year}`,
+          time12,
+        });
+        if (buf) {
+          // No caption with the card — the card already shows the time.
+          return await message.reply({
+            body: "",
+            attachment: { buffer: buf, mimetype: "image/png", fileName: "time.png" },
+          });
+        }
+      } catch (e) {
+        console.error("Time card render failed:", e.message);
+      }
+
+      return await message.reply(textMsg);
     } catch (err) {
       console.error("Time command error:", err.message);
       return message.reply("╔═══ 𝐄𝐑𝐑𝐎𝐑 ═══╗\n║ ❌ Failed to fetch time. Please try again later\n╚══════════════════╝");
     }
   },
 };
+
+/**
+ * Render the 1000x420 time card and return a PNG buffer, or null when
+ * canvas is unavailable. Synchronous — no avatar or network involved.
+ */
+function renderTimeCard({ time24, dateLine, time12 }) {
+  const c = card.newCard(1000, 420);
+  if (!c) return null;
+  const { canvas, ctx, W, H } = c;
+
+  // Big digital time, centered.
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillStyle = card.BRAND.text;
+  ctx.font = "bold 90px sans-serif";
+  ctx.fillText(time24, W / 2, 150);
+
+  // Purple accent rule under the time.
+  ctx.fillStyle = card.BRAND.purple;
+  ctx.fillRect(W / 2 - 120, 210, 240, 4);
+
+  // Date line.
+  ctx.fillStyle = card.BRAND.subtle;
+  ctx.font = "30px sans-serif";
+  ctx.fillText(dateLine, W / 2, 262);
+
+  // 12-hour time + timezone.
+  ctx.fillStyle = card.BRAND.purpleLight;
+  ctx.font = "26px sans-serif";
+  ctx.fillText(`${time12}  •  ${TIMEZONE}`, W / 2, 312);
+
+  card.footer(ctx, W, H);
+  return card.toPng(canvas);
+}

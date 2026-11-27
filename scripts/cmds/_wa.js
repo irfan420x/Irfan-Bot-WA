@@ -135,7 +135,18 @@ async function translateMessage(sock, msg) {
   const isGroup = isGroupJid(remoteJid);
   if (isGroup) knownGroupJids.add(remoteJid);
 
-  const senderJid = isGroup ? (key.participant || remoteJid) : remoteJid;
+  // Sender JID: prefer the PHONE-number JID over the LID. WhatsApp hides
+  // phone numbers behind LIDs for some users, so key.participant can be a
+  // LID JID (e.g. 100000123456789@lid) while the phone JID arrives in
+  // key.participantPn (groups) / key.senderPn (DMs) — Baileys 6.7.24
+  // decode-wa-message.js populates both from the stanza attrs. The LID
+  // never matches config.owner/adminBot (phone numbers), so using it made
+  // the bot fail to recognise its own admin. Fall back to the raw
+  // participant when no phone JID is present.
+  const phoneJid = (jid) => (typeof jid === "string" && jid.endsWith("@s.whatsapp.net")) ? jid : null;
+  const senderJid = isGroup
+    ? (phoneJid(key.participantPn) || key.participant || remoteJid)
+    : (phoneJid(key.senderPn) || remoteJid);
   const content = unwrapMessage(msg && msg.message);
   const contextInfo = getContextInfo(content);
 
@@ -187,6 +198,12 @@ async function translateMessage(sock, msg) {
     threadIDFull: remoteJid,
     senderID: jidToId(senderJid),
     senderIDFull: senderJid,
+    // The sender's LID (if WhatsApp sent one) — kept so group-admin checks
+    // can match it when groupMetadata lists admins by LID.
+    senderLid: jidToId(key.participantLid || key.senderLid || "") || null,
+    // The sender's WhatsApp display name (push name) — the most reliable
+    // name source. Commands use it when the DB record has no name yet.
+    senderName: (msg && msg.pushName) || null,
     messageID: key.id || null,
     isGroup,
     type: "message",
@@ -208,6 +225,25 @@ function toBaileysContent(content) {
 
   const body = typeof content.body === "string" ? content.body : "";
   const att = content.attachment;
+  // Native WhatsApp message kinds that toBaileysContent cannot express as
+  // text/media. These pass through verbatim to sock.sendMessage via
+  // deliver() (guarded send). Verified against Baileys 6.7.24:
+  // - poll: Types/Message.d.ts:145 { poll: PollMessageOptions } and
+  //   Utils/messages.js:394-410 (messageSecret auto-generated).
+  // - pin: Types/Message.d.ts:162-170 { pin: WAMessageKey,
+  //   type: proto.PinInChat.Type, time?: 86400|604800|2592000 } and
+  //   Utils/messages.js:351-357 (type 1 = pin, 2 = unpin — runtime
+  //   proto.Message.PinInChatMessage.Type: PIN_FOR_ALL=1,
+  //   UNPIN_FOR_ALL=2).
+  // - contacts: Types/Message.d.ts:149 { contacts: { displayName?,
+  //   contacts: proto.Message.IContactMessage[] } }.
+  // - location: Types/Message.d.ts:152 { location: WALocationMessage }
+  //   (= proto.Message.ILocationMessage: degreesLatitude,
+  //   degreesLongitude, name?, address?).
+  if (content.poll && typeof content.poll === "object") return { poll: content.poll };
+  if (content.pin) return { pin: content.pin, type: content.type, time: content.time };
+  if (content.contacts) return { contacts: content.contacts };
+  if (content.location) return { location: content.location };
   if (!att) return { text: body };
 
   const media = att.buffer || att.url;
@@ -312,6 +348,18 @@ function createMessage(sock, event) {
       if (!targetId) return null;
       const result = await deliver(sock, jid, {
         delete: { remoteJid: jid, fromMe: true, id: targetId }
+      }, {});
+      return normalizeInfo(result);
+    },
+    // Edit a text message the bot sent (id = messageID returned by a send).
+    // WhatsApp edits only change text — a text message cannot be edited
+    // into an image, so animated commands edit the spin text, then unsend
+    // it and send the result card as a fresh message.
+    async edit(id, text) {
+      if (!id) return null;
+      const result = await deliver(sock, jid, {
+        text: text || "",
+        edit: { remoteJid: jid, fromMe: true, id }
       }, {});
       return normalizeInfo(result);
     }

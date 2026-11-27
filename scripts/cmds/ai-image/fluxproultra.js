@@ -56,6 +56,7 @@ module.exports = {
     try { if (message.react) await message.react("⏳️"); } catch (e) {}
 
     let waitingID = null;
+    let waitEdited = false; // set when the wait message is edited in place (error path)
     try {
       const waiting = await message.reply("⏳️ Generating your image.. Please wait...");
       waitingID = waiting && waiting.messageID;
@@ -79,9 +80,17 @@ module.exports = {
       } else if (error && error.code === "TENSORART_CREDITS") {
         text = "╔═══ 𝐄𝐑𝐑𝐎𝐑 ═══╗\n║ ⏳ আজকের ক্রেডিট শেষ — কাল আবার চেষ্টা করো।\n╚══════════════════╝";
       }
-      try { await message.reply(text); } catch (e) {}
+      // Edit-in-place: the wait message becomes the error (one message,
+      // not wait + error). If the edit fails, fall back to a fresh reply
+      // and let finally remove the wait message.
+      if (waitingID && typeof message.edit === "function") {
+        try { await message.edit(waitingID, text); waitEdited = true; } catch (e) {}
+      }
+      if (!waitEdited) {
+        try { await message.reply(text); } catch (e) {}
+      }
     } finally {
-      if (waitingID && message.unsend) {
+      if (waitingID && !waitEdited && message.unsend) {
         try { await message.unsend(waitingID); } catch (e) {}
       }
     }
