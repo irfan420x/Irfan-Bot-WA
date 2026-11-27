@@ -18,6 +18,9 @@
  */
 
 const qrcode = require('qrcode-terminal');
+const qrcodePng = require('qrcode');
+const path = require('path');
+const fs = require('fs');
 const {
   default: makeWASocket,
   DisconnectReason,
@@ -50,15 +53,30 @@ function disconnectStatusCode(err) {
   return null;
 }
 
-async function createSocket(state, config, events = {}) {
+async function createSocket(state, config, events = {}, saveCreds) {
   const { onOpen, onClose, onLoggedOut, onQR } = events;
 
+  // fetchLatestBaileysVersion() has no built-in timeout and fetches from
+  // raw.githubusercontent.com — if that host is unreachable the fetch HANGS
+  // and the socket is never created (seen on the VM 2026-11-27: GitHub raw
+  // returns nothing while web.whatsapp.com works). Race it against a 10s
+  // timeout so a hang becomes a fallback. The fallback MUST be a real
+  // version array — NOT undefined: Baileys' getUserAgent reads
+  // config.version[0..2] during reconnect validation, and undefined
+  // crashes it ("Cannot read properties of undefined (reading '0')").
+  // [2, 3000, 1043857760] is Baileys 6.7.24's bundled default
+  // (lib/Defaults/baileys-version.json).
+  const BUNDLED_VERSION = [2, 3000, 1043857760];
   let version;
   try {
-    ({ version } = await fetchLatestBaileysVersion());
+    const timeout = new Promise((_, reject) =>
+      setTimeout(() => reject(new Error('version fetch timed out after 10s')), 10_000)
+    );
+    ({ version } = await Promise.race([fetchLatestBaileysVersion(), timeout]));
+    if (!Array.isArray(version) || version.length < 3) throw new Error('bad version from fetch');
   } catch (err) {
-    console.warn(`[WABOT] Could not fetch latest Baileys version (${err.message}) — using bundled default.`);
-    version = undefined;
+    console.warn(`[WABOT] Could not fetch latest Baileys version (${err.message}) — using bundled ${JSON.stringify(BUNDLED_VERSION)}.`);
+    version = BUNDLED_VERSION;
   }
 
   const sock = makeWASocket({
@@ -75,13 +93,25 @@ async function createSocket(state, config, events = {}) {
     getMessage: async () => undefined
   });
 
-  // Persist credential updates.
-  sock.ev.on('creds.update', state.saveCreds);
+  // Persist credential updates. saveCreds comes from useMultiFileAuthState
+  // as a SEPARATE return value — it is NOT a property of `state`
+  // (state is only { creds, keys }). Wiring state.saveCreds (undefined)
+  // throws "listener must be of type function".
+  if (typeof saveCreds === 'function') {
+    sock.ev.on('creds.update', saveCreds);
+  } else {
+    console.error('[WABOT] WARNING: saveCreds is not a function — credential updates will NOT be persisted. The session will not survive a restart.');
+  }
 
-  // Pairing code flow: only when the session is not registered yet and the
-  // operator asked for it. Runs async — the QR flow is the fallback.
-  const pairingNumber = (config.pairingNumber || '').replace(/\D/g, '');
-  if (pairingNumber && !state.creds.registered) {
+  // Pairing code flow: DISABLED (2026-11-27). Requesting a pairing code
+  // in parallel with a QR login corrupts the session: Baileys sends a
+  // link_code_companion_reg for the same number AFTER the QR login
+  // succeeds, and WhatsApp then invalidates the session (401 within
+  // ~2 min). QR and pairing code are mutually exclusive login methods —
+  // this bot uses QR only. Pairing code can be re-enabled by setting
+  // config.pairingNumber AND removing this guard.
+  const pairingNumber = '';
+  if (false && pairingNumber && !state.creds.registered) {
     // Small delay: requestPairingCode right at socket creation can race
     // the underlying connection setup.
     setTimeout(async () => {
@@ -109,12 +139,41 @@ async function createSocket(state, config, events = {}) {
       console.log('[WABOT] Scan this QR code with WhatsApp (Linked devices):');
       qrcode.generate(qr, { small: true });
       console.log('');
+      // Save the QR as a PNG image too (for sending to the operator).
+      // Overwritten on every new QR so the file is always the current one.
+      // QR codes expire quickly — scan promptly.
+      try {
+        const qrPath = path.join(__dirname, '..', '..', 'data', 'qr.png');
+        fs.mkdirSync(path.dirname(qrPath), { recursive: true });
+        qrcodePng.toFile(qrPath, qr, { width: 512, margin: 2 }, (err) => {
+          if (err) console.error(`[WABOT] Could not save QR PNG: ${err.message}`);
+          else console.log(`[WABOT] QR PNG saved: ${qrPath} — scan it promptly, it expires fast.`);
+        });
+      } catch (err) {
+        console.error(`[WABOT] Could not save QR PNG: ${err.message}`);
+      }
       if (typeof onQR === 'function') onQR(qr);
     }
 
     if (connection === 'open') {
       const jid = sock.user && sock.user.id ? sock.user.id : 'unknown';
       console.log(`[WABOT] Connection open — logged in as ${jid}.`);
+      // FIX (2026-11-27): Baileys does NOT always set creds.registered=true
+      // after a QR login — it can emit 'open' while registered stays false.
+      // A false registered flag makes every reconnect request a NEW pairing
+      // code and lets WhatsApp invalidate the session (401). So mark the
+      // session registered HERE and persist it immediately.
+      try {
+        if (state && state.creds && state.creds.registered !== true) {
+          state.creds.registered = true;
+          if (typeof saveCreds === 'function') {
+            saveCreds().catch((e) => console.error(`[WABOT] Could not persist registered flag: ${e.message}`));
+          }
+          console.log('[WABOT] Session marked registered and persisted.');
+        }
+      } catch (e) {
+        console.error(`[WABOT] Could not mark session registered: ${e.message}`);
+      }
       if (typeof onOpen === 'function') onOpen(sock);
       return;
     }

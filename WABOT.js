@@ -86,6 +86,14 @@ async function start() {
   await db.init(config);
   const { usersData, threadsData } = db;
 
+  // 1b. Languages (en + bn) — loaded once, cached; per-thread language is resolved per message in the handler.
+  try {
+    require('./core/languages/makeFuncGetLangs').loadLanguages();
+    logger.info('Languages loaded (en, bn).');
+  } catch (err) {
+    logger.warn(`Languages failed to load (${err.message}) — system messages will fall back to English.`);
+  }
+
   // 2. Commands.
   const { commands, failed } = loader.loadCommands();
   logger.info(`Loaded ${commands.size} command(s).`);
@@ -143,7 +151,7 @@ async function start() {
         // Exit so the supervisor restarts us and prints a fresh QR.
         process.exit(1);
       }
-    });
+    }, saveCreds);
     return socket;
   }
 
@@ -186,6 +194,15 @@ async function start() {
 
 function getWabot() {
   return global.wabot || null;
+}
+
+// When run directly (`node WABOT.js`, or via the index.js supervisor which
+// spawns this file), start the bot. Requiring the file must NOT auto-connect.
+if (require.main === module) {
+  start().catch((err) => {
+    console.error('[WABOT] Fatal startup error:', err && err.message ? err.message : err);
+    process.exit(1);
+  });
 }
 
 module.exports = { start, getWabot };

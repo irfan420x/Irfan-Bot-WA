@@ -10,9 +10,12 @@ module.exports = {
     guide: "{pn}prefix"
   },
 
-  onStart: async function ({ message }) {
+  onStart: async function ({ event, message }) {
     const prefix = (global.wabot && global.wabot.config && global.wabot.config.prefix) || ".";
     const botName = (global.wabot && global.wabot.config && global.wabot.config.nickNameBot) || "WABOT";
-    await message.reply(`${botName} prefix: ${prefix}\nUse ${prefix}help to see all commands.`);
+    const getLang = (event && typeof event.getLang === 'function') ? event.getLang : null;
+    await message.reply(getLang
+      ? getLang('cmds.prefix.text.reply', botName, prefix)
+      : `${botName} prefix: ${prefix}\nUse ${prefix}help to see all commands.`);
   }
 };

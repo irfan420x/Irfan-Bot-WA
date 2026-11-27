@@ -235,6 +235,7 @@ async function handleMessage(message, event, usersData, api, question) {
       if (err || !info || !info.messageID) return;
       if (global.wabot && global.wabot.replyMap) {
         global.wabot.replyMap.set(info.messageID, {
+          name: "irfan",
           commandName: "irfan",
           author: event.senderID
         });

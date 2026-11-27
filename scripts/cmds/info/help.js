@@ -11,6 +11,12 @@ module.exports = {
   },
 
   onStart: async function ({ api, event, args, message }) {
+    const getLang = (event && typeof event.getLang === 'function') ? event.getLang : null;
+    // Fall back to the current English strings if the handler never attached getLang.
+    const t = (path, ...a) => {
+      if (getLang) return getLang(path, ...a);
+      return null;
+    };
     const prefix = (global.wabot && global.wabot.config && global.wabot.config.prefix) || ".";
     const botName = (global.wabot && global.wabot.config && global.wabot.config.nickNameBot) || "WABOT";
     const commands = (global.wabot && global.wabot.commands) || new Map();
@@ -20,7 +26,8 @@ module.exports = {
       const query = String(args[0]).trim().toLowerCase();
       const cmd = commands.get(query);
       if (!cmd || !cmd.config) {
-        return message.reply(`No command named "${query}". Try ${prefix}help to see all commands.`);
+        return message.reply(t('cmds.help.text.commandNotFound', query, prefix)
+          || `No command named "${query}". Try ${prefix}help to see all commands.`);
       }
       const cfg = cmd.config;
       const lines = [
@@ -28,7 +35,7 @@ module.exports = {
         `Description: ${cfg.description || "—"}`,
         `Category: ${cfg.category || "—"}`,
         `Version: ${cfg.version || "—"}`,
-        `Role: ${roleName(cfg.role)}`,
+        `Role: ${roleName(cfg.role, getLang)}`,
         `Aliases: ${(cfg.aliases && cfg.aliases.length > 0) ? cfg.aliases.join(", ") : "—"}`,
         `Usage: ${(cfg.guide || "{pn}" + cfg.name).replace(/\{pn\}/g, prefix)}`
       ];
@@ -48,22 +55,27 @@ module.exports = {
     }
 
     if (byCategory.size === 0) {
-      return message.reply("No commands loaded.");
+      return message.reply(t('cmds.help.text.noCommands') || "No commands loaded.");
     }
 
-    const lines = [`${botName} — Commands (prefix: ${prefix})`, ""];
+    const lines = [t('cmds.help.text.listHeader', botName, prefix) || `${botName} — Commands (prefix: ${prefix})`, ""];
     const categories = [...byCategory.keys()].sort();
     for (const cat of categories) {
       lines.push(`— ${cat} —`);
       lines.push(byCategory.get(cat).sort().map((n) => `${prefix}${n}`).join("  "));
       lines.push("");
     }
-    lines.push(`Type ${prefix}help <command> for details about one command.`);
+    lines.push(t('cmds.help.text.listFooter', prefix) || `Type ${prefix}help <command> for details about one command.`);
     return message.reply(lines.join("\n").trim());
   }
 };
 
-function roleName(role) {
+function roleName(role, getLang) {
+  if (getLang) {
+    if (role === 2) return getLang('cmds.help.text.roleText2');
+    if (role === 1) return getLang('cmds.help.text.roleText1');
+    return getLang('cmds.help.text.roleText0');
+  }
   if (role === 2) return "bot admin";
   if (role === 1) return "group admin";
   return "everyone";

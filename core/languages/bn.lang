@@ -1,0 +1,17 @@
+# handlerEvents — system messages
+handlerEvents.commandNotFound="%1" নামে কোনো কমান্ড নেই, সব কমান্ড দেখতে %2help লিখুন
+handlerEvents.commandNotFound2=হেই! %1, শুধু প্রিফিক্স দিলে কিছু হয় না, আমি কী করতে পারি দেখতে %2help লিখুন
+handlerEvents.commandSyntaxError=তুমি ভুলভাবে কমান্ডটি ব্যবহার করছো, ব্যবহারবিধি দেখতে %1help %2 লিখুন
+handlerEvents.onlyAdmin=❌ | হেই, %1 — "%2" কমান্ডটি শুধু গ্রুপ অ্যাডমিনরা ব্যবহার করতে পারে
+handlerEvents.onlyAdminBot2=❌ | হেই, %1 — "%2" কমান্ডটি শুধু বট অ্যাডমিন ব্যবহার করতে পারে
+handlerEvents.onlyCreator=❌ | হেই, %1 — "%2" কমান্ডটি শুধু বটের মালিক ব্যবহার করতে পারে
+handlerEvents.waitingForCommand=⏱ তুমি এই কমান্ডটি ব্যবহারের অপেক্ষার সময়ে আছো, %1 সেকেন্ড পর আবার চেষ্টা করো
+handlerEvents.errorOccurred=❌ [ %1 ]\n"%2" কমান্ডে একটি ত্রুটি ঘটেছে\n\n%3
+handlerEvents.cannotFindCommandName=❌ এই রিপ্লাইটি চালানোর জন্য কমান্ডের নাম খুঁজে পাওয়া যায়নি!
+handlerEvents.cannotFindCommand=❌ এই রিপ্লাইটি চালানোর জন্য "%1" কমান্ডটি খুঁজে পাওয়া যায়নি!
+# wabot — WhatsApp handler system messages
+wabot.onlyBotAdmin=এই কমান্ডটি শুধু বট অ্যাডমিনদের জন্য।
+wabot.onlyGroup=এই কমান্ডটি শুধু গ্রুপে কাজ করে।
+wabot.onlyGroupAdmin=এই কমান্ডটি শুধু গ্রুপ অ্যাডমিনদের জন্য।
+wabot.cooldown=ধীরে করো — %2 আবার ব্যবহারের আগে %1 সেকেন্ড অপেক্ষা করো।
+wabot.commandError=কমান্ডটি চালানোর সময় কিছু একটা ভুল হয়েছে।

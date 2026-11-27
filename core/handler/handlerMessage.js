@@ -25,6 +25,7 @@
 
 const path = require('path');
 const db = require('../database/db');
+const { createGetLang, DEFAULT_LANG } = require('../languages/makeFuncGetLangs');
 
 const WA_ADAPTER_PATH = path.join(__dirname, '..', '..', 'scripts', 'cmds', '_wa.js');
 
@@ -341,6 +342,16 @@ async function handlerMessage(sock, msg) {
   const usersData = (global.wabot && global.wabot.db && global.wabot.db.usersData) || db.usersData;
   const threadsData = (global.wabot && global.wabot.db && global.wabot.db.threadsData) || db.threadsData;
 
+  // Per-thread language (default 'en'). Attached to the event so commands can use event.getLang(path, ...args).
+  let threadLang = DEFAULT_LANG || 'en';
+  try {
+    const thread = await threadsData.get(event.threadID);
+    const saved = thread && thread.settings && thread.settings.language;
+    if (saved === 'en' || saved === 'bn') threadLang = saved;
+  } catch (_) { /* keep default */ }
+  event.language = threadLang;
+  event.getLang = createGetLang(threadLang);
+
   const body = (event.body || '').trim();
 
   // --- Command path -------------------------------------------------------
@@ -358,12 +369,12 @@ async function handlerMessage(sock, msg) {
 
     // Role check.
     if (role === 2 && !isBotAdmin(config, event.senderID)) {
-      return message.reply('This command is for bot admins only.');
+      return message.reply(event.getLang('wabot.onlyBotAdmin'));
     }
     if (role === 1) {
-      if (!event.isGroup) return message.reply('This command only works in groups.');
+      if (!event.isGroup) return message.reply(event.getLang('wabot.onlyGroup'));
       if (!(await isGroupAdmin(sock, api, event))) {
-        return message.reply('This command is for group admins only.');
+        return message.reply(event.getLang('wabot.onlyGroupAdmin'));
       }
     }
 
@@ -374,7 +385,7 @@ async function handlerMessage(sock, msg) {
       const last = cooldowns.get(cdKey) || 0;
       const remainingMs = last + countDown * 1000 - Date.now();
       if (remainingMs > 0) {
-        return message.reply(`Slow down — wait ${Math.ceil(remainingMs / 1000)}s before using ${prefix}${cmd.config.name} again.`);
+        return message.reply(event.getLang('wabot.cooldown', String(Math.ceil(remainingMs / 1000)), prefix + cmd.config.name));
       }
       cooldowns.set(cdKey, Date.now());
     }
@@ -384,7 +395,7 @@ async function handlerMessage(sock, msg) {
     } catch (err) {
       console.error(`[WABOT] Command "${cmd.config.name}" failed: ${err.stack || err.message}`);
       try {
-        await message.reply('Something went wrong while running that command.');
+        await message.reply(event.getLang('wabot.commandError'));
       } catch (_) { /* ignore reply failure */ }
     }
     return;
